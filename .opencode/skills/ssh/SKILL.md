@@ -52,6 +52,28 @@ Decide from the output (auto-detect first, install only what's missing):
 - `~/toolset` or `~/.local` missing → create them (§3.3).
 - `UID=0` → STOP, this skill forbids root; ask the user for a non-root account.
 
+### 1a. Source `$HOME/.my_vars` (every session)
+
+`$D` maintains a file `$HOME/.my_vars` of environment variables pointing to
+useful tools/benchmarks. **Every** remote shell that runs an experiment or
+build must export these first:
+
+```
+ssh <D> 'set -a; source "$HOME/.my_vars"; set +a; <your command>'
+```
+
+`set -a` makes every assignment in the file an exported env var; `set +a`
+turns that off after. After sourcing, list what was loaded so you know which
+tools/benchmarks are available:
+
+```
+ssh <D> 'set -a; source "$HOME/.my_vars"; set +a; env | sort'
+```
+
+If `$HOME/.my_vars` is absent, skip silently (do not fail the run) but mention
+it to the user — they may need to create it on `$D`. Never write secrets from
+`$S` into this file; it is maintained on `$D` by the user.
+
 ## 2. Local rules (`$S`)
 
 1. **No heavy computation locally** — smoke tests and trivial checks only.
@@ -67,12 +89,13 @@ Decide from the output (auto-detect first, install only what's missing):
    - Binaries / symlinks → `~/.local/` (e.g. `~/.local/bin/foo`).
    - Put `~/.local/bin` on PATH: `export PATH="$HOME/.local/bin:$PATH"` (append to `~/.bashrc`/`~/.zshrc` if it should persist for the session).
    - Python packages go into the project venv, not system site-packages.
-4. **Log every experiment.** Capture stdout+stderr with `2>&1 | tee ./tmp/<exp>/log.txt`.
-5. **Parallelism up to 15 cores.** Cap at `min(15, nproc)`. Patterns: `make -j 15`, `xargs -P 15`, `ninja -j 15`, python `multiprocessing.Pool(15)` / joblib `n_jobs=15`.
-6. **Always rebuild on `$D$`.** Never trust binaries synced from `$S` (different platform / toolchain). Sync source, then build on `$D$`.
-7. **Python projects:** create a project-local virtual environment (`.venv`), or a conda env matching the project's convention. Install every package there.
-8. **Self-resolve errors.** If a build/experiment fails because a tool is missing, install it under `~/toolset`/`~/.local` per §3.3 and retry. Never report "needs sudo" — there is always a non-root path. Only after a genuine dead-end should you ask the user.
-9. **Record operations in `op.md`** (§5) and bring it back to `$S`.
+4. **Source `$HOME/.my_vars` before every experiment/build.** Prefix each remote command with `set -a; source "$HOME/.my_vars"; set +a;` (see §1a). This makes tool/benchmark paths from the file available to the run.
+5. **Log every experiment.** Capture stdout+stderr with `2>&1 | tee ./tmp/<exp>/log.txt`.
+6. **Parallelism up to 15 cores.** Cap at `min(15, nproc)`. Patterns: `make -j 15`, `xargs -P 15`, `ninja -j 15`, python `multiprocessing.Pool(15)` / joblib `n_jobs=15`.
+7. **Always rebuild on `$D`** (different platform / toolchain). Sync source, then build on `$D`.
+8. **Python projects:** create a project-local virtual environment (`.venv`), or a conda env matching the project's convention. Install every package there.
+9. **Self-resolve errors.** If a build/experiment fails because a tool is missing, install it under `~/toolset`/`~/.local` per §3.3 and retry. Never report "needs sudo" — there is always a non-root path. Only after a genuine dead-end should you ask the user.
+10. **Record operations in `op.md`** (§5) and bring it back to `$S`.
 
 ## 4. Sync patterns (`$S` ↔ `$D`)
 

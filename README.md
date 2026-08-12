@@ -19,6 +19,7 @@ When a task involves running experiments or builds on a remote server, the skill
 - No `sudo`/root — dependencies install as a normal user:
   - sources/builds → `~/toolset/`
   - binaries/symlinks → `~/.local/` (`~/.local/bin` on `PATH`)
+- `$HOME/.my_vars` is sourced (`set -a; source ~/.my_vars; set +a`) before every experiment/build so tool/benchmark paths are available.
 - Every experiment is logged (`log.txt`).
 - Parallelism capped at **15 cores** (`make -j 15`, `xargs -P 15`, `Pool(15)`, …).
 - Always rebuild on `$D` (different platform/toolchain than `$S`) — never trust synced binaries.
@@ -77,7 +78,7 @@ After restart, the skill auto-triggers whenever a task mentions running experime
 
 ## Validating the install
 
-Open [`tests/TESTS.md`](./tests/TESTS.md) and run the T0–T9 checklist against a chosen host. Each test targets one skill rule (connectivity, non-root, no-`/tmp`, `~/toolset`+`~/.local`, env probe, venv, parallelism ≤15, log+`op.md` round-trip, rebuild-on-`$D`, self-resolution). All ten must pass before trusting the install. The checklist creates a throwaway `~/projects/ssh-skill-test/` on the target and cleans it up at the end.
+Open [`tests/TESTS.md`](./tests/TESTS.md) and run the T0–T10 checklist against a chosen host. Each test targets one skill rule (connectivity, non-root, no-`/tmp`, `~/toolset`+`~/.local`, env probe, venv, parallelism ≤15, log+`op.md` round-trip, rebuild-on-`$D`, self-resolution, `~/.my_vars` sourcing). All eleven must pass before trusting the install. The checklist creates a throwaway `~/projects/ssh-skill-test/` on the target and cleans it up at the end.
 
 ## Customizing
 

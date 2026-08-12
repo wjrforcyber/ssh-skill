@@ -161,6 +161,29 @@ command -v rts-yq-real && rts-yq-real'
 
 ---
 
+## T10 — Source `$HOME/.my_vars` before experiments  *(skill §1a, §3.4)*
+**Goal:** `set -a; source ~/.my_vars; set +a` exports the file's variables into the experiment shell (visible to child processes).
+
+This test is non-destructive: it backs up any existing `~/.my_vars`, writes a throwaway test file, verifies, then restores the original.
+```
+ssh $D 'set -e
+F="$HOME/.my_vars"
+# back up existing file (if any)
+if [ -f "$F" ]; then cp "$F" "$F.bak.$(date +%s)"; HAD=1; else HAD=0; fi
+# write a throwaway vars file
+printf "%s\n" "MYBENCH=$HOME/benchmarks/foo" "MYTOOL=frobnicate" > "$F"
+# source + verify export into a CHILD process (python), proving they left the shell
+set -a; source "$F"; set +a
+echo "shell-sees: MYBENCH=$MYBENCH MYTOOL=$MYTOOL"
+python3 -c "import os;print(\"child-sees:\", os.environ.get(\"MYBENCH\"), os.environ.get(\"MYTOOL\"))"
+# restore
+if [ "$HAD" = "1" ]; then mv "$F.bak."* "$F"; else rm -f "$F"; fi
+echo "restored (HAD=$HAD)"'
+```
+**Pass:** `shell-sees:` and `child-sees:` both print `MYBENCH=.../benchmarks/foo` and `MYTOOL=frobnicate`, and the final line says `restored (HAD=0|1)` (original file state preserved).
+
+---
+
 ## Result summary
 
 | Test | Rule | Result |
@@ -175,8 +198,9 @@ command -v rts-yq-real && rts-yq-real'
 | T7 | log + op.md round-trip | ☐ PASS / ☐ FAIL |
 | T8 | rebuild on `$D` | ☐ PASS / ☐ FAIL |
 | T9 | self-resolution, no sudo | ☐ PASS / ☐ FAIL |
+| T10 | source `$HOME/.my_vars` before experiments | ☐ PASS / ☐ FAIL |
 
-**Gate:** all ten must be PASS before copying `SKILL.md` to `~/.config/opencode/skills/ssh/`.
+**Gate:** all eleven must be PASS before copying `SKILL.md` to `~/.config/opencode/skills/ssh/`.
 
 ## Cleanup (after the gate passes)
 ```
