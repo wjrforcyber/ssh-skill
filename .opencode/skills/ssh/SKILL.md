@@ -43,6 +43,7 @@ echo "CONDA=$(conda --version 2>&1 || echo missing)"
 echo "PIP=$(pip3 --version 2>&1 || echo missing)"
 for d in "$HOME/toolset" "$HOME/.local"; do [ -d "$d" ] && echo "HAS:$d" || echo "MISSING:$d"; done
 echo "UID=$(id -u)"
+echo "GTIME=$(ls /usr/bin/time 2>/dev/null || echo missing)"
 echo "SHELL=$SHELL"'
 ```
 
@@ -50,6 +51,7 @@ Decide from the output (auto-detect first, install only what's missing):
 - `python3` present → use it for the project venv.
 - `conda` present and the project already uses conda → match that style.
 - `~/toolset` or `~/.local` missing → create them (§3.3).
+- `/usr/bin/time` missing → needed for the §3.7 gate; build GNU time into `~/toolset` per §3.3, or use the bash `TIMEFORMAT='%U %S %R'` fallback.
 - `UID=0` → STOP, this skill forbids root; ask the user for a non-root account.
 
 ### 1a. Source `$HOME/.my_vars` (every session)
@@ -91,11 +93,33 @@ it to the user — they may need to create it on `$D`. Never write secrets from
    - Python packages go into the project venv, not system site-packages.
 4. **Source `$HOME/.my_vars` before every experiment/build.** Prefix each remote command with `set -a; source "$HOME/.my_vars"; set +a;` (see §1a). This makes tool/benchmark paths from the file available to the run.
 5. **Log every experiment.** Capture stdout+stderr with `2>&1 | tee ./tmp/<exp>/log.txt`.
-6. **Parallelism up to 15 cores.** Cap at `min(15, nproc)`. Patterns: `make -j 15`, `xargs -P 15`, `ninja -j 15`, python `multiprocessing.Pool(15)` / joblib `n_jobs=15`.
-7. **Always rebuild on `$D`** (different platform / toolchain). Sync source, then build on `$D`.
-8. **Python projects:** create a project-local virtual environment (`.venv`), or a conda env matching the project's convention. Install every package there.
-9. **Self-resolve errors.** If a build/experiment fails because a tool is missing, install it under `~/toolset`/`~/.local` per §3.3 and retry. Never report "needs sudo" — there is always a non-root path. Only after a genuine dead-end should you ask the user.
-10. **Record operations in `op.md`** (§5) and bring it back to `$S`.
+6. **Total thread budget: ≤ 15 cores for the whole run.** The budget applies to the *sum* across all layers: `outer_jobs × threads_per_job ≤ 15`. Outer patterns (`make -j 15`, `xargs -P 15`, `ninja -j 15`, python `Pool(15)` / `n_jobs=15`) are valid ONLY with per-job threading capped at 1; a single-process run may use `T=15`. Most runtimes default their thread count to `nproc` (e.g. 64) — 15 jobs × 64 threads ≈ 960 threads saturates the whole box. So every experiment prefix extends §1a with thread caps:
+   ```
+   set -a; source "$HOME/.my_vars"; set +a
+   T=1                                    # choose so that outer_jobs × T ≤ 15
+   export OMP_NUM_THREADS=$T OPENBLAS_NUM_THREADS=$T MKL_NUM_THREADS=$T \
+          NUMEXPR_NUM_THREADS=$T RAYON_NUM_THREADS=$T VECLIB_MAXIMUM_THREADS=$T
+   ```
+7. **Core-budget check — hard gate.** Wrap every experiment (the top-level command, not each job) in GNU time:
+   ```
+   /usr/bin/time -v -o ./tmp/<exp>/time.txt <experiment command>
+   ```
+   Then compute the cores actually used and gate on it:
+   ```
+   awk -F": " "/User time/{u=\$2}/System time/{s=\$2}/Elapsed/{n=split(\$NF,t,\":\");e=t[n]+(n>1?t[n-1]*60:0)+(n>2?t[n-2]*3600:0)}END{printf \"cores_used=%.2f\n\",(u+s)/e}" ./tmp/<exp>/time.txt
+   ```
+   Make the gate mechanical (non-zero exit on violation), never a judgment call:
+   ```
+   C=$(awk -F": " "/User time/{u=\$2}/System time/{s=\$2}/Elapsed/{n=split(\$NF,t,\":\");e=t[n]+(n>1?t[n-1]*60:0)+(n>2?t[n-2]*3600:0)}END{printf \"%.2f\",(u+s)/e}" ./tmp/<exp>/time.txt)
+   awk -v c="$C" "BEGIN{exit !(c+0<=15.5)}" || { echo "GATE FAIL: cores_used=$C > 15"; exit 1; }
+   ```
+   Gate: `cores_used ≤ 15` (tolerance +0.5). If exceeded, the run is **INVALID** — tighten the rule-6 caps, re-run, and only then accept the results. Record the number in `op.md` (§5). If `/usr/bin/time` is missing, see the §1 fallback.
+
+   **Scope of the control:** rule-6 env caps are *cooperative* — OpenMP/BLAS-style runtimes honor them, but code spawning raw threads (pthreads, Go, JVM, custom pools) ignores them; only this gate catches those, post-hoc. If a codebase repeatedly violates the budget, escalate to hard pinning: `taskset -c 0-14 <cmd>` (no root needed) — threads then timeshare 15 CPUs no matter how many are spawned.
+8. **Always rebuild on `$D`** (different platform / toolchain). Sync source, then build on `$D`.
+9. **Python projects:** create a project-local virtual environment (`.venv`), or a conda env matching the project's convention. Install every package there.
+10. **Self-resolve errors.** If a build/experiment fails because a tool is missing, install it under `~/toolset`/`~/.local` per §3.3 and retry. Never report "needs sudo" — there is always a non-root path. Only after a genuine dead-end should you ask the user.
+11. **Record operations in `op.md`** (§5) and bring it back to `$S`.
 
 ## 4. Sync patterns (`$S` ↔ `$D`)
 
@@ -131,6 +155,7 @@ session/experiment:
 - Commands:
     <verbatim or faithful summary>
 - Result: <pass/fail + key numbers>
+- Cores: ~N.N / 15 (time -v: pass | FAIL → tightened caps and re-ran)
 - Errors: <none | description + how you fixed it>
 - Artifacts: ./tmp/<exp>/{log.txt, results/}
 - Next: <follow-up, if any>
@@ -139,7 +164,7 @@ session/experiment:
 ## 6. Review on `$S` (after each remote run)
 
 1. Pull `op.md` + the relevant `tmp/` logs to `$S`.
-2. Check for errors; verify the result matches what was expected.
+2. Check for errors; audit the `- Cores:` line (must be ≤ 15 and not FAIL); verify the result matches what was expected.
 3. If errors → fix the script/plan on `$S`, re-push, re-run. Do **not** edit experiment logic "live" on `$D`.
 4. Report findings to the user with `path:line` references.
 

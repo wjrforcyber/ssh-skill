@@ -83,7 +83,7 @@ for d in "$HOME/toolset" "$HOME/.local"; do [ -d "$d" ] && echo "HAS:$d" || echo
 
 ---
 
-## T5 — Project-local Python venv  *(skill §3.7)*
+## T5 — Project-local Python venv  *(skill §3.9)*
 **Goal:** create a venv *inside the project*, install a tiny package, import it.
 ```
 ssh $D 'set -e
@@ -97,7 +97,7 @@ python -c "import six; print(\"six-\", six.__version__)"'
 
 ---
 
-## T6 — Parallelism capped at 15 cores  *(skill §3.5)*
+## T6 — Parallelism capped at 15 cores  *(skill §3.6)*
 **Goal:** a job runs across multiple workers, never requesting more than 15.
 ```
 ssh $D 'cd ~/projects/'"$PROJ"'
@@ -110,7 +110,7 @@ seq 1 $((N*4)) | xargs -P "$N" -I{} sh -c "echo worker-{} on $(hostname)" | sort
 
 ---
 
-## T7 — Experiment log + `op.md` round-trip  *(skill §3.4, §5, §6)*
+## T7 — Experiment log + `op.md` round-trip  *(skill §3.5, §5, §6)*
 **Goal:** run a trivial experiment that writes `log.txt` + `op.md`, then rsync them back to `$S`.
 ```
 # on $D
@@ -144,7 +144,7 @@ ssh $D 'cd ~/projects/'"$PROJ"' && (cc src/hello.c -o tmp/hello 2>/dev/null && .
 
 ---
 
-## T9 — Self-resolution stress (no sudo)  *(skill §3.8)*
+## T9 — Self-resolution stress (no sudo)  *(skill §3.10)*
 **Goal:** when a tool is missing, the skill installs it under `~/toolset`/`~/.local` **without sudo**.
 ```
 # ask for a deliberately missing tool, then provide a non-root install
@@ -184,6 +184,89 @@ echo "restored (HAD=$HAD)"'
 
 ---
 
+## T11 — Total thread budget ≤ 15 (nested threading) + hard gate  *(skill §3.6, §3.7)*
+
+**Goal:** (a) demonstrate that outer `-P 15` alone oversubscribes when each job spawns its own threads (BLAS defaults to `nproc`); (b) verify the thread-cap prefix + `/usr/bin/time -v` gate keep total usage ≤ 15.
+
+> Step (a) deliberately saturates the box for a few seconds — run when the server is idle, or shrink the matrix size.
+
+```
+ssh $D 'set -e
+set -a; source "$HOME/.my_vars"; set +a
+cd ~/projects/'"$PROJ"'
+[ -d .venv ] || python3 -m venv .venv
+.venv/bin/pip install -q numpy
+mkdir -p tmp/t11
+
+cat > tmp/t11/mm.py <<"PY"
+import numpy as np, sys, time
+a = np.random.rand(1500, 1500); b = np.random.rand(1500, 1500)
+t = time.time()
+for _ in range(int(sys.argv[1])): c = a @ b
+print("job-done", round(time.time() - t, 2))
+PY
+
+cat > tmp/t11/cores.sh <<"SH"
+#!/bin/sh
+awk -F": " "/User time/{u=\$2}/System time/{s=\$2}/Elapsed/{n=split(\$NF,t,\":\");e=t[n]+(n>1?t[n-1]*60:0)+(n>2?t[n-2]*3600:0)}END{printf \"cores_used=%.2f\n\",(u+s)/e}" "$1"
+SH
+chmod +x tmp/t11/cores.sh
+
+# (a) NO caps: 15 jobs, each free to spawn nproc BLAS threads
+seq 1 15 | /usr/bin/time -v -o tmp/t11/time_nocaps.txt xargs -P 15 -I{} .venv/bin/python tmp/t11/mm.py 4
+./tmp/t11/cores.sh tmp/t11/time_nocaps.txt
+
+# (b) capped: same jobs with the rule-6 thread prefix
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 RAYON_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1
+seq 1 15 | /usr/bin/time -v -o tmp/t11/time_capped.txt xargs -P 15 -I{} .venv/bin/python tmp/t11/mm.py 4
+./tmp/t11/cores.sh tmp/t11/time_capped.txt'
+```
+
+**Pass:**
+- (a) prints `cores_used` **> 15** — reproduces the oversubscription hole (this sub-step intentionally violates the gate).
+- (b) prints `cores_used` **≤ 15.5** — the hard gate passes once the caps are exported.
+
+---
+
+## T12 — Control verification: gate rejects violations; env caps are cooperative  *(skill §3.6, §3.7)*
+
+**Goal:** prove the budget control actually *enforces*: (1) the gate exits 0 on a compliant run, (2) a workload that ignores env caps is measured over-budget and the gate **exits 1**, (3) `taskset` contains even that workload (the escalation path).
+
+```
+ssh $D 'set -e
+set -a; source "$HOME/.my_vars"; set +a
+cd ~/projects/'"$PROJ"'
+mkdir -p tmp/t12
+# gate: parse time.txt, exit non-zero on violation
+cat > tmp/t12/gate.sh <<"SH"
+#!/bin/sh
+L=${2:-15.5}
+C=$(awk -F": " "/User time/{u=\$2}/System time/{s=\$2}/Elapsed/{n=split(\$NF,t,\":\");e=t[n]+(n>1?t[n-1]*60:0)+(n>2?t[n-2]*3600:0)}END{printf \"%.2f\",(u+s)/e}" "$1")
+echo "cores_used=$C limit=$L"
+awk -v c="$C" -v l="$L" "BEGIN{exit !(c+0<=l+0)}"
+SH
+chmod +x tmp/t12/gate.sh
+
+# (1) compliant: caps + xargs -P 15  -> expect GATE exit 0
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 RAYON_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1
+seq 1 15 | /usr/bin/time -v -o tmp/t12/time_capped.txt xargs -P 15 -I{} .venv/bin/python tmp/t11/mm.py 4 > /dev/null
+./tmp/t12/gate.sh tmp/t12/time_capped.txt && echo "GATE: PASS (exit 0)" || echo "GATE: FAIL (exit 1)"
+
+# (2) adversarial: 60 raw pthreads, ALL caps exported -> expect cores >> 15, GATE exit 1
+/usr/bin/time -v -o tmp/t12/time_adv.txt ./tmp/t12/adv 60
+if ./tmp/t12/gate.sh tmp/t12/time_adv.txt; then echo "GATE: PASS (exit 0)"; else echo "GATE: FAIL (exit 1) -> run correctly REJECTED"; fi
+
+# (3) escalation: same program hard-pinned -> expect cores <= 15, GATE exit 0
+taskset -c 0-14 /usr/bin/time -v -o tmp/t12/time_adv_pin.txt ./tmp/t12/adv 60
+./tmp/t12/gate.sh tmp/t12/time_adv_pin.txt && echo "GATE: PASS under taskset (exit 0)"'
+```
+
+(Reuses `tmp/t11/mm.py` and `tmp/t12/adv` from T11's build: `cc -O2 -pthread adv.c -o adv` on a 60-thread busy-loop program.)
+
+**Pass:** exactly this pattern — compliant run `cores_used ≤ 15.5` + exit 0; adversarial run `cores_used > 15` (env caps ignored, as designed) + exit 1; taskset run `cores_used ≤ 15.5` + exit 0.
+
+---
+
 ## Result summary
 
 | Test | Rule | Result |
@@ -199,8 +282,10 @@ echo "restored (HAD=$HAD)"'
 | T8 | rebuild on `$D` | ☐ PASS / ☐ FAIL |
 | T9 | self-resolution, no sudo | ☐ PASS / ☐ FAIL |
 | T10 | source `$HOME/.my_vars` before experiments | ☐ PASS / ☐ FAIL |
+| T11 | total thread budget ≤ 15 + hard gate | ☐ PASS / ☐ FAIL |
+| T12 | gate rejects violations; env caps cooperative | ☐ PASS / ☐ FAIL |
 
-**Gate:** all eleven must be PASS before copying `SKILL.md` to `~/.config/opencode/skills/ssh/`.
+**Gate:** all thirteen must be PASS before copying `SKILL.md` to `~/.config/opencode/skills/ssh/`.
 
 ## Cleanup (after the gate passes)
 ```

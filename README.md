@@ -21,7 +21,7 @@ When a task involves running experiments or builds on a remote server, the skill
   - binaries/symlinks → `~/.local/` (`~/.local/bin` on `PATH`)
 - `$HOME/.my_vars` is sourced (`set -a; source ~/.my_vars; set +a`) before every experiment/build so tool/benchmark paths are available.
 - Every experiment is logged (`log.txt`).
-- Parallelism capped at **15 cores** (`make -j 15`, `xargs -P 15`, `Pool(15)`, …).
+- Total thread budget ≤ **15 cores** for the whole run (`outer_jobs × threads_per_job ≤ 15`), enforced via `OMP/OPENBLAS/MKL/…_NUM_THREADS` caps; every run is wrapped in `/usr/bin/time -v` and hard-gated — >15 cores actually used means the run is invalid and must be re-run with tighter caps.
 - Always rebuild on `$D` (different platform/toolchain than `$S`) — never trust synced binaries.
 - Python projects use a project-local venv (`.venv`) or conda env matching the project.
 - Self-resolve missing-tool errors via non-root install; never request sudo.
@@ -78,7 +78,7 @@ After restart, the skill auto-triggers whenever a task mentions running experime
 
 ## Validating the install
 
-Open [`tests/TESTS.md`](./tests/TESTS.md) and run the T0–T10 checklist against a chosen host. Each test targets one skill rule (connectivity, non-root, no-`/tmp`, `~/toolset`+`~/.local`, env probe, venv, parallelism ≤15, log+`op.md` round-trip, rebuild-on-`$D`, self-resolution, `~/.my_vars` sourcing). All eleven must pass before trusting the install. The checklist creates a throwaway `~/projects/ssh-skill-test/` on the target and cleans it up at the end.
+Open [`tests/TESTS.md`](./tests/TESTS.md) and run the T0–T12 checklist against a chosen host. Each test targets one skill rule (connectivity, non-root, no-`/tmp`, `~/toolset`+`~/.local`, env probe, venv, parallelism ≤15, log+`op.md` round-trip, rebuild-on-`$D`, self-resolution, `~/.my_vars` sourcing, thread budget + hard gate, gate rejection control). All thirteen must pass before trusting the install. The checklist creates a throwaway `~/projects/ssh-skill-test/` on the target and cleans it up at the end.
 
 ## Customizing
 
