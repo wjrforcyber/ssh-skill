@@ -25,8 +25,25 @@ Never hardcode hostnames, IPs, or credentials. They live in `~/.ssh/config`.
 3. **More than one** → ask the user which host to use this session; cache the choice.
 4. **None** → ask the user for `user@host[:port]`.
 
-Use the chosen alias as `<D>` for every `ssh`/`rsync`/`scp` command. If a
-connection fails, surface the exact ssh error and re-resolve.
+Use the chosen alias as `<D>` for every `ssh`/`rsync`/`scp` command.
+
+### 0a. Connection retry policy
+
+The VPN to `$D` is sometimes down. Wrap the FIRST connection of a session in this exact retry loop — max **5 attempts**, **10 s** sleep between attempts, fast-fail per attempt — then stop and report:
+
+```
+for i in 1 2 3 4 5; do
+  ssh -o ConnectTimeout=10 -o ConnectionAttempts=1 <D> 'hostname' && break
+  if [ "$i" = 5 ]; then echo "FAILED to connect to <D> after 5 attempts (VPN down? last ssh error above)"; exit 1; fi
+  echo "attempt $i failed; retrying in 10s"; sleep 10
+done
+```
+
+Rules:
+- Never sleep more than **10 s** between attempts (no 60 s/600 s waits); never exceed **5** attempts total.
+- `ConnectTimeout=10` makes each attempt fail fast; `ConnectionAttempts=1` stops ssh from retrying internally on top of this loop.
+- After the 5th failure, STOP: report "failed to connect" with the last ssh error and wait for the user (likely VPN issue). Do not keep retrying and do not silently fall back to another host.
+- Only the first connection of a session needs the loop; once verified up, run subsequent commands directly (still with `-o ConnectTimeout=10`).
 
 ## 1. Probe the remote environment (once per session)
 

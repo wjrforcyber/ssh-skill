@@ -267,6 +267,39 @@ taskset -c 0-14 /usr/bin/time -v -o tmp/t12/time_adv_pin.txt ./tmp/t12/adv 60
 
 ---
 
+## T13 — Connection retry policy (5 attempts, 10 s sleep, then abort)  *(skill §0a)*
+
+**Goal:** verify the retry loop makes exactly 5 fast-failing attempts with 10 s sleeps, then aborts with the FAILED message (no long sleeps) — and that a reachable host passes on attempt 1.
+
+Runs on `$S`; no remote changes. Part (a) targets a local port with nothing listening (instant "connection refused"), so elapsed time isolates the four 10 s sleeps.
+
+```
+D=<D>     # your host alias
+attempts=0
+retry() { # $1 = ssh args
+  for i in 1 2 3 4 5; do
+    attempts=$((attempts+1))
+    ssh -o ConnectTimeout=10 -o ConnectionAttempts=1 "$@" 'hostname' 2>/dev/null && return 0
+    if [ "$i" = 5 ]; then echo "FAILED to connect after 5 attempts"; return 1; fi
+    sleep 10
+  done
+}
+
+# (a) unreachable target
+attempts=0; S=$(date +%s); retry -p 22222 127.0.0.1; RC=$?; E=$(( $(date +%s) - S ))
+echo "(a) attempts=$attempts rc=$RC elapsed=${E}s"
+
+# (b) reachable target
+attempts=0; S=$(date +%s); retry "$D"; RC=$?; E=$(( $(date +%s) - S ))
+echo "(b) attempts=$attempts rc=$RC elapsed=${E}s"
+```
+
+**Pass:**
+- (a) `attempts=5`, `rc=1`, `FAILED to connect after 5 attempts` printed, `elapsed` ≈ 40 s and **< 90 s** (proves 10 s sleeps, nothing like 600 s).
+- (b) `attempts=1`, `rc=0`, fast.
+
+---
+
 ## Result summary
 
 | Test | Rule | Result |
@@ -284,8 +317,9 @@ taskset -c 0-14 /usr/bin/time -v -o tmp/t12/time_adv_pin.txt ./tmp/t12/adv 60
 | T10 | source `$HOME/.my_vars` before experiments | ☐ PASS / ☐ FAIL |
 | T11 | total thread budget ≤ 15 + hard gate | ☐ PASS / ☐ FAIL |
 | T12 | gate rejects violations; env caps cooperative | ☐ PASS / ☐ FAIL |
+| T13 | connection retry 5 × 10 s then abort | ☐ PASS / ☐ FAIL |
 
-**Gate:** all thirteen must be PASS before copying `SKILL.md` to `~/.config/opencode/skills/ssh/`.
+**Gate:** all fourteen must be PASS before copying `SKILL.md` to `~/.config/opencode/skills/ssh/`.
 
 ## Cleanup (after the gate passes)
 ```

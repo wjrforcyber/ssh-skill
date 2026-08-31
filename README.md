@@ -29,6 +29,8 @@ When a task involves running experiments or builds on a remote server, the skill
 
 **Host resolution** — reads `~/.ssh/config`; if one `Host` entry exists it's used, if several the agent asks once per session, if none it asks for `user@host[:port]`. No hostnames or credentials are stored in the skill.
 
+**Connection retries** — the first connection of a session is wrapped in a 5-attempt loop with 10 s sleeps (fast-fail per attempt); after the 5th failure it aborts with "failed to connect" and waits for the user (VPN-down case). Never longer sleeps.
+
 **Review (`$S`)** — after each run, fetch `op.md` + logs, check for errors, verify against expectations, fix the script on `$S` and re-run if needed.
 
 ## Repository layout
@@ -78,7 +80,7 @@ After restart, the skill auto-triggers whenever a task mentions running experime
 
 ## Validating the install
 
-Open [`tests/TESTS.md`](./tests/TESTS.md) and run the T0–T12 checklist against a chosen host. Each test targets one skill rule (connectivity, non-root, no-`/tmp`, `~/toolset`+`~/.local`, env probe, venv, parallelism ≤15, log+`op.md` round-trip, rebuild-on-`$D`, self-resolution, `~/.my_vars` sourcing, thread budget + hard gate, gate rejection control). All thirteen must pass before trusting the install. The checklist creates a throwaway `~/projects/ssh-skill-test/` on the target and cleans it up at the end.
+Open [`tests/TESTS.md`](./tests/TESTS.md) and run the T0–T13 checklist against a chosen host. Each test targets one skill rule (connectivity, non-root, no-`/tmp`, `~/toolset`+`~/.local`, env probe, venv, parallelism ≤15, log+`op.md` round-trip, rebuild-on-`$D`, self-resolution, `~/.my_vars` sourcing, thread budget + hard gate, gate rejection control, connection retry policy). All fourteen must pass before trusting the install. The checklist creates a throwaway `~/projects/ssh-skill-test/` on the target and cleans it up at the end.
 
 ## Customizing
 
