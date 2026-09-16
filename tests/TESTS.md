@@ -11,9 +11,10 @@
 ## Setup
 
 1. Pick the target host. Replace `<D>` below with a host alias from
-   `~/.ssh/config` (candidates: `MICSHPC`, `HKUSTGZServer`).
+   your own `~/.ssh/config`. Do not write real aliases, hostnames, or IPs
+   into this repo — it is public.
    ```
-   D=<D>        # e.g. D=HKUSTGZServer
+   D=<D>        # e.g. D=MyServer
    PROJ=ssh-skill-test
    ```
 
@@ -300,6 +301,54 @@ echo "(b) attempts=$attempts rc=$RC elapsed=${E}s"
 
 ---
 
+## T14 — Download fallback: probe, remote-first, local transfer, report  *(skill §4a)*
+
+**Goal:** (a) the probe runs on both `$S` and `$D` and reports speeds;
+(b) a download that fails 3× on `$D` falls back to "download on `$S` + rsync
+up" and the file arrives intact; (c) a URL dead on both sides stops with a
+report instead of improvising mirrors. Uses an instant-refusing URL so no
+step hangs; sleeps are shortened to 2 s (policy allows 10 s) to keep the
+test quick.
+
+```
+URL_OK='https://speed.cloudflare.com/__down?bytes=1000000'
+URL_DEAD='https://127.0.0.1:9/nope.bin'
+
+# (a) probes — record both numbers
+curl -L -sS -o /dev/null --max-time 15 -w 'S speed=%{speed_download} http=%{http_code}\n' "$URL_OK"
+ssh $D 'curl -L -sS -o /dev/null --max-time 15 -w "D speed=%{speed_download} http=%{http_code}\n" "'"$URL_OK"'"'
+
+# (b) 3 fast remote failures, then local download + transfer + checksum
+ssh $D "mkdir -p ~/projects/$PROJ"
+ok=0
+for i in 1 2 3; do
+  ssh $D "curl -sS -C - --connect-timeout 3 --max-time 10 -o ~/projects/$PROJ/dead.bin '$URL_DEAD'" && { ok=1; break; }
+  [ "$i" = 3 ] || sleep 2
+done
+[ "$ok" = 0 ] && echo "REMOTE-FAIL-3x (expected)"
+mkdir -p tmp
+curl -L -sS -o tmp/t14-fallback.bin "$URL_OK"
+rsync -avz tmp/t14-fallback.bin "$D:~/projects/$PROJ/t14-fallback.bin"
+S_SUM=$( (shasum -a 256 tmp/t14-fallback.bin || sha256sum tmp/t14-fallback.bin) | cut -d" " -f1 )
+D_SUM=$( ssh $D '(shasum -a 256 ~/projects/'"$PROJ"'/t14-fallback.bin || sha256sum ~/projects/'"$PROJ"'/t14-fallback.bin) | cut -d" " -f1' )
+echo "S=$S_SUM"; echo "D=$D_SUM"
+[ -n "$S_SUM" ] && [ "$S_SUM" = "$D_SUM" ] && echo "TRANSFER-OK"
+
+# (c) dead on both sides -> must STOP and report, no mirror hunting
+curl -sS --connect-timeout 3 -o /dev/null "$URL_DEAD" 2>/dev/null || echo "LOCAL-FAIL (expected) -> STOP and report to user"
+```
+
+**Pass:**
+- (a) both probe lines print `speed=` and `http=200` (a blocked probe on `$D`
+  is a valid outcome — record it as *unhealthy*; part (b) then exercises the
+  fallback for real).
+- (b) prints `REMOTE-FAIL-3x (expected)` then `TRANSFER-OK` with identical
+  hashes.
+- (c) prints `LOCAL-FAIL (expected) -> STOP and report to user`, and nothing
+  further runs (no mirrors, no alternate URLs).
+
+---
+
 ## Result summary
 
 | Test | Rule | Result |
@@ -318,8 +367,9 @@ echo "(b) attempts=$attempts rc=$RC elapsed=${E}s"
 | T11 | total thread budget ≤ 15 + hard gate | ☐ PASS / ☐ FAIL |
 | T12 | gate rejects violations; env caps cooperative | ☐ PASS / ☐ FAIL |
 | T13 | connection retry 5 × 10 s then abort | ☐ PASS / ☐ FAIL |
+| T14 | download fallback (probe → remote-first → local transfer → report) | ☐ PASS / ☐ FAIL |
 
-**Gate:** all fourteen must be PASS before copying `SKILL.md` to `~/.config/opencode/skills/ssh/`.
+**Gate:** all fifteen must be PASS before copying `SKILL.md` to `~/.config/opencode/skills/ssh/`.
 
 ## Cleanup (after the gate passes)
 ```

@@ -25,6 +25,7 @@ When a task involves running experiments or builds on a remote server, the skill
 - Always rebuild on `$D` (different platform/toolchain than `$S`) — never trust synced binaries.
 - Python projects use a project-local venv (`.venv`) or conda env matching the project.
 - Self-resolve missing-tool errors via non-root install; never request sudo.
+- **Downloads** — both networks are probed once per session; if `$D` is healthy (≥ 1 MB/s) files download directly on `$D` (max 3 attempts), otherwise they download on `$S` and are rsynced to `$D`; if that also fails, the agent stops and reports instead of improvising mirrors.
 - Operations are recorded in `op.md`, which is pulled back to `$S`.
 
 **Host resolution** — reads `~/.ssh/config`; if one `Host` entry exists it's used, if several the agent asks once per session, if none it asks for `user@host[:port]`. No hostnames or credentials are stored in the skill.
@@ -80,7 +81,7 @@ After restart, the skill auto-triggers whenever a task mentions running experime
 
 ## Validating the install
 
-Open [`tests/TESTS.md`](./tests/TESTS.md) and run the T0–T13 checklist against a chosen host. Each test targets one skill rule (connectivity, non-root, no-`/tmp`, `~/toolset`+`~/.local`, env probe, venv, parallelism ≤15, log+`op.md` round-trip, rebuild-on-`$D`, self-resolution, `~/.my_vars` sourcing, thread budget + hard gate, gate rejection control, connection retry policy). All fourteen must pass before trusting the install. The checklist creates a throwaway `~/projects/ssh-skill-test/` on the target and cleans it up at the end.
+Open [`tests/TESTS.md`](./tests/TESTS.md) and run the T0–T14 checklist against a chosen host. Each test targets one skill rule (connectivity, non-root, no-`/tmp`, `~/toolset`+`~/.local`, env probe, venv, parallelism ≤15, log+`op.md` round-trip, rebuild-on-`$D`, self-resolution, `~/.my_vars` sourcing, thread budget + hard gate, gate rejection control, connection retry policy, download fallback). All fifteen must pass before trusting the install. The checklist creates a throwaway `~/projects/ssh-skill-test/` on the target and cleans it up at the end.
 
 ## Customizing
 

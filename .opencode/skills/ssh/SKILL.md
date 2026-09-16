@@ -1,6 +1,6 @@
 ---
 name: ssh
-description: Use when running experiments or builds on a remote compute server over SSH, syncing a project to a remote machine, or pulling back experiment logs and an op.md for review. Enforces the local/remote split — thinking on local, heavy compute on the remote server via ssh; no sudo; deps under ~/toolset or ~/.local; no /tmp; project-local venv; up to 15 cores. Trigger keywords: ssh, remote server, cluster, HPC, GPU box, deploy to server, run experiment remotely, sync project, op.md, experiment logs.
+description: Use when running experiments or builds on a remote compute server over SSH, syncing a project to a remote machine, downloading files onto the remote machine, or pulling back experiment logs and an op.md for review. Enforces the local/remote split — thinking on local, heavy compute on the remote server via ssh; no sudo; deps under ~/toolset or ~/.local; no /tmp; project-local venv; up to 15 cores. Trigger keywords: ssh, remote server, cluster, HPC, GPU box, deploy to server, run experiment remotely, sync project, download to server, op.md, experiment logs.
 ---
 
 # SSH remote-compute skill
@@ -160,6 +160,59 @@ rsync -avz "<D>:~/projects/$PROJ/op.md" ./op.md
 
 Never sync secrets (`.env` with keys, credentials, private tokens).
 
+### 4a. Downloads for `$D` — remote-first, local-network fallback
+
+When a file (tarball, wheel, dataset, model weights…) must end up on `$D`,
+do not assume `$D`'s network is healthy — group servers often have slow or
+partially blocked egress. Probe first, then choose the path.
+
+**1. Probe both networks — once per session, cache the numbers:**
+
+```
+# on $S:
+curl -L -sS -o /dev/null --max-time 15 \
+  -w 'S speed=%{speed_download} B/s http=%{http_code}\n' \
+  'https://speed.cloudflare.com/__down?bytes=20000000'
+# on $D:
+ssh <D> 'curl -L -sS -o /dev/null --max-time 15 \
+  -w "D speed=%{speed_download} B/s http=%{http_code}\n" \
+  "https://speed.cloudflare.com/__down?bytes=20000000"'
+```
+
+**Healthy = exit 0, `http=200`, speed ≥ 1000000 B/s (1 MB/s).** If `$D` cannot
+reach the probe endpoint at all, that already counts as unhealthy — do not
+hunt for another probe URL. (No curl on `$D`? Install it under `~/toolset`
+per §3.3.)
+
+**2. Remote healthy → download on `$D`.** Max **3 attempts**, ≤ 10 s sleep
+between attempts, resume partial downloads, and size `--max-time` to the
+file (expected bytes ÷ 1 MB/s) so a stalled attempt fails fast:
+
+```
+ok=0
+for i in 1 2 3; do
+  curl -L -C - -o <dest-on-D> --max-time <seconds> '<url>' && { ok=1; break; }
+  if [ "$i" = 3 ]; then echo "3x failed on <D>; falling back to $S"; else sleep 10; fi
+done
+```
+
+Verify exit 0 (and the published checksum, if any). Tool/tarball downloads →
+`~/toolset/` (§3.3); datasets → inside the project dir. Never `/tmp`.
+
+**3. Remote unhealthy, or the 3 attempts failed → download on `$S`, transfer
+up.** Same 3-attempt loop on `$S`, then push to the same path:
+
+```
+rsync -avz --partial ./<file> "<D>:<dest-on-D>"
+```
+
+**4. This path failed too → STOP and report to the user.** Include both probe
+speeds, the 3 remote errors, and the local download/transfer error. Do not
+improvise mirrors, proxies, or alternative URLs on your own.
+
+Record the outcome in `op.md` (§5): which path was taken plus both probe
+speeds.
+
 ## 5. `op.md` convention
 
 `op.md` is an append-only log of what was done on `$D`. One section per
@@ -173,6 +226,7 @@ session/experiment:
     <verbatim or faithful summary>
 - Result: <pass/fail + key numbers>
 - Cores: ~N.N / 15 (time -v: pass | FAIL → tightened caps and re-ran)
+- Downloads: <none | <file> via $D-direct | $S→$D transfer (D: x.x, S: y.y MB/s)>
 - Errors: <none | description + how you fixed it>
 - Artifacts: ./tmp/<exp>/{log.txt, results/}
 - Next: <follow-up, if any>
@@ -181,7 +235,7 @@ session/experiment:
 ## 6. Review on `$S` (after each remote run)
 
 1. Pull `op.md` + the relevant `tmp/` logs to `$S`.
-2. Check for errors; audit the `- Cores:` line (must be ≤ 15 and not FAIL); verify the result matches what was expected.
+2. Check for errors; audit the `- Cores:` line (must be ≤ 15 and not FAIL); if `- Downloads:` shows a fallback transfer, confirm the file's checksum on `$D` matches; verify the result matches what was expected.
 3. If errors → fix the script/plan on `$S`, re-push, re-run. Do **not** edit experiment logic "live" on `$D`.
 4. Report findings to the user with `path:line` references.
 
