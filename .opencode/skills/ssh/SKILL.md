@@ -1,6 +1,6 @@
 ---
 name: ssh
-description: Use when running experiments or builds on a remote compute server over SSH, syncing a project to a remote machine, downloading files onto the remote machine, or pulling back experiment logs and an op.md for review. Enforces the local/remote split — thinking on local, heavy compute on the remote server via ssh; no sudo; deps under ~/toolset or ~/.local; no /tmp; project-local venv; up to 15 cores. Trigger keywords: ssh, remote server, cluster, HPC, GPU box, deploy to server, run experiment remotely, sync project, download to server, op.md, experiment logs.
+description: Use when running experiments or builds on a remote compute server over SSH, syncing a project to a remote machine, downloading files onto the remote machine, or pulling back experiment logs and an op.md for review. Enforces the local/remote split — thinking on local, heavy compute on the remote server via ssh; no sudo; deps under ~/toolset or ~/.local; no /tmp; project-local venv; capped core budget (default 15, user may override). Trigger keywords: ssh, remote server, cluster, HPC, GPU box, deploy to server, run experiment remotely, sync project, download to server, op.md, experiment logs.
 ---
 
 # SSH remote-compute skill
@@ -53,7 +53,7 @@ Before real work, run a single one-shot probe and adapt all later steps to it:
 ssh <D> 'set +e
 echo "HOST=$(hostname)"
 echo "UNAME=$(uname -a)"
-echo "CORES=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN)"
+echo "CORES=$(getconf _NPROCESSORS_ONLN 2>/dev/null || env -u OMP_NUM_THREADS nproc)"
 echo "HOME=$HOME"
 echo "PY=$(python3 --version 2>&1 || echo missing)"
 echo "CONDA=$(conda --version 2>&1 || echo missing)"
@@ -68,8 +68,16 @@ Decide from the output (auto-detect first, install only what's missing):
 - `python3` present → use it for the project venv.
 - `conda` present and the project already uses conda → match that style.
 - `~/toolset` or `~/.local` missing → create them (§3.3).
+- `CORES` is probed via `getconf` on purpose: plain `nproc` honors
+  `OMP_NUM_THREADS`, so once thread caps are exported it would report the
+  capped value (e.g. 1) and corrupt the budget clamp.
 - `/usr/bin/time` missing → needed for the §3.7 gate; build GNU time into `~/toolset` per §3.3, or use the bash `TIMEFORMAT='%U %S %R'` fallback.
 - `UID=0` → STOP, this skill forbids root; ask the user for a non-root account.
+- Fix the session thread budget `BUDGET`: **15 by default.** Only an explicit
+  user instruction for this session may change it (e.g. "you can use 20 cores
+  on <D>" → `BUDGET=20`); clamp it to `CORES` if the user asked for more than
+  the box has, and tell them. Never raise the budget yourself because a run
+  is slow or failed. Every rule below (§3.6, §3.7, §6) uses `$BUDGET`.
 
 ### 1a. Source `$HOME/.my_vars` (every session)
 
@@ -110,10 +118,19 @@ it to the user — they may need to create it on `$D`. Never write secrets from
    - Python packages go into the project venv, not system site-packages.
 4. **Source `$HOME/.my_vars` before every experiment/build.** Prefix each remote command with `set -a; source "$HOME/.my_vars"; set +a;` (see §1a). This makes tool/benchmark paths from the file available to the run.
 5. **Log every experiment.** Capture stdout+stderr with `2>&1 | tee ./tmp/<exp>/log.txt`.
-6. **Total thread budget: ≤ 15 cores for the whole run.** The budget applies to the *sum* across all layers: `outer_jobs × threads_per_job ≤ 15`. Outer patterns (`make -j 15`, `xargs -P 15`, `ninja -j 15`, python `Pool(15)` / `n_jobs=15`) are valid ONLY with per-job threading capped at 1; a single-process run may use `T=15`. Most runtimes default their thread count to `nproc` (e.g. 64) — 15 jobs × 64 threads ≈ 960 threads saturates the whole box. So every experiment prefix extends §1a with thread caps:
+6. **Total thread budget: ≤ `$BUDGET` cores for the whole run (default 15).**
+   `$BUDGET` is fixed once per session in §1: 15 unless the user explicitly
+   granted a different cap — never raised on your own initiative. The budget
+   applies to the *sum* across all layers: `outer_jobs × threads_per_job ≤ $BUDGET`.
+   Outer patterns (`make -j $BUDGET`, `xargs -P $BUDGET`, `ninja -j $BUDGET`,
+   python `Pool($BUDGET)` / `n_jobs=$BUDGET`) are valid ONLY with per-job
+   threading capped at 1; a single-process run may use `T=$BUDGET`. Most
+   runtimes default their thread count to `nproc` — `$BUDGET` jobs × `nproc`
+   threads saturates the whole box. So every experiment prefix extends §1a
+   with thread caps:
    ```
    set -a; source "$HOME/.my_vars"; set +a
-   T=1                                    # choose so that outer_jobs × T ≤ 15
+   T=1                                    # choose so that outer_jobs × T ≤ $BUDGET
    export OMP_NUM_THREADS=$T OPENBLAS_NUM_THREADS=$T MKL_NUM_THREADS=$T \
           NUMEXPR_NUM_THREADS=$T RAYON_NUM_THREADS=$T VECLIB_MAXIMUM_THREADS=$T
    ```
@@ -128,11 +145,15 @@ it to the user — they may need to create it on `$D`. Never write secrets from
    Make the gate mechanical (non-zero exit on violation), never a judgment call:
    ```
    C=$(awk -F": " "/User time/{u=\$2}/System time/{s=\$2}/Elapsed/{n=split(\$NF,t,\":\");e=t[n]+(n>1?t[n-1]*60:0)+(n>2?t[n-2]*3600:0)}END{printf \"%.2f\",(u+s)/e}" ./tmp/<exp>/time.txt)
-   awk -v c="$C" "BEGIN{exit !(c+0<=15.5)}" || { echo "GATE FAIL: cores_used=$C > 15"; exit 1; }
+   awk -v c="$C" -v b="$BUDGET" "BEGIN{exit !(c+0<=b+0.5)}" || { echo "GATE FAIL: cores_used=$C > $BUDGET"; exit 1; }
    ```
-   Gate: `cores_used ≤ 15` (tolerance +0.5). If exceeded, the run is **INVALID** — tighten the rule-6 caps, re-run, and only then accept the results. Record the number in `op.md` (§5). If `/usr/bin/time` is missing, see the §1 fallback.
+   Gate: `cores_used ≤ $BUDGET` (tolerance +0.5; `$BUDGET` from §1 — 15 unless
+   the user explicitly overrode it this session). If exceeded, the run is
+   **INVALID** — tighten the rule-6 caps, re-run, and only then accept the
+   results. Record the number in `op.md` (§5). If `/usr/bin/time` is missing,
+   see the §1 fallback.
 
-   **Scope of the control:** rule-6 env caps are *cooperative* — OpenMP/BLAS-style runtimes honor them, but code spawning raw threads (pthreads, Go, JVM, custom pools) ignores them; only this gate catches those, post-hoc. If a codebase repeatedly violates the budget, escalate to hard pinning: `taskset -c 0-14 <cmd>` (no root needed) — threads then timeshare 15 CPUs no matter how many are spawned.
+   **Scope of the control:** rule-6 env caps are *cooperative* — OpenMP/BLAS-style runtimes honor them, but code spawning raw threads (pthreads, Go, JVM, custom pools) ignores them; only this gate catches those, post-hoc. If a codebase repeatedly violates the budget, escalate to hard pinning: `taskset -c 0-$((BUDGET-1)) <cmd>` (no root needed) — threads then timeshare `$BUDGET` CPUs no matter how many are spawned.
 8. **Always rebuild on `$D`** (different platform / toolchain). Sync source, then build on `$D`.
 9. **Python projects:** create a project-local virtual environment (`.venv`), or a conda env matching the project's convention. Install every package there.
 10. **Self-resolve errors.** If a build/experiment fails because a tool is missing, install it under `~/toolset`/`~/.local` per §3.3 and retry. Never report "needs sudo" — there is always a non-root path. Only after a genuine dead-end should you ask the user.
@@ -225,7 +246,7 @@ session/experiment:
 - Commands:
     <verbatim or faithful summary>
 - Result: <pass/fail + key numbers>
-- Cores: ~N.N / 15 (time -v: pass | FAIL → tightened caps and re-ran)
+- Cores: ~N.N / <BUDGET> (15 default | user-set N) (time -v: pass | FAIL → tightened caps and re-ran)
 - Downloads: <none | <file> via $D-direct | $S→$D transfer (D: x.x, S: y.y MB/s)>
 - Errors: <none | description + how you fixed it>
 - Artifacts: ./tmp/<exp>/{log.txt, results/}
@@ -235,7 +256,7 @@ session/experiment:
 ## 6. Review on `$S` (after each remote run)
 
 1. Pull `op.md` + the relevant `tmp/` logs to `$S`.
-2. Check for errors; audit the `- Cores:` line (must be ≤ 15 and not FAIL); if `- Downloads:` shows a fallback transfer, confirm the file's checksum on `$D` matches; verify the result matches what was expected.
+2. Check for errors; audit the `- Cores:` line (must be ≤ the session budget `$BUDGET` from §1 and not FAIL); if `- Downloads:` shows a fallback transfer, confirm the file's checksum on `$D` matches; verify the result matches what was expected.
 3. If errors → fix the script/plan on `$S`, re-push, re-run. Do **not** edit experiment logic "live" on `$D`.
 4. Report findings to the user with `path:line` references.
 
@@ -244,4 +265,6 @@ session/experiment:
 - No LLM on `$D` — only executable scripts/plans cross the wire.
 - No `sudo`, no `/tmp`, no heavy compute on `$S`.
 - No hardcoded hostnames/credentials — resolve from `~/.ssh/config` or ask.
+- Never exceed the session thread budget `$BUDGET` — 15 unless the user
+  explicitly raised it for this session (§1); you may never raise it yourself.
 - Every remote operation is logged and reviewed on `$S`.

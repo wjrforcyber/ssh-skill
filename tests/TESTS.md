@@ -349,6 +349,59 @@ curl -sS --connect-timeout 3 -o /dev/null "$URL_DEAD" 2>/dev/null || echo "LOCAL
 
 ---
 
+## T15 — User-granted budget override (default 15, user says 20)  *(skill §1, §3.6, §3.7)*
+
+**Goal:** (a) an ~17–20-core run is correctly REJECTED by the default gate
+(15.5); (b) the identical run PASSES once the user grants `BUDGET=20` for the
+session — proving the gate threshold follows the user's number instead of a
+hardcoded 15; (c) the budget is clamped to the box's real core count.
+
+> (a) deliberately exceeds 15 cores for a few seconds — run when the server
+> is idle. Reuses `tmp/t11/mm.py` from T11. On a shared/loaded box the
+> wall-clock ratio dilutes (~85%), so 20 jobs land at ~17–20 `cores_used` —
+> safely above the default 15.5 gate and below the 20.5 override gate.
+
+```
+ssh $D 'set -e
+set -a; source "$HOME/.my_vars"; set +a
+cd ~/projects/'"$PROJ"'
+mkdir -p tmp/t15
+cat > tmp/t15/gate.sh <<"SH"
+#!/bin/sh
+L=${2:-15.5}
+C=$(awk -F": " "/User time/{u=\$2}/System time/{s=\$2}/Elapsed/{n=split(\$NF,t,\":\");e=t[n]+(n>1?t[n-1]*60:0)+(n>2?t[n-2]*3600:0)}END{printf \"%.2f\",(u+s)/e}" "$1")
+echo "cores_used=$C limit=$L"
+awk -v c="$C" -v l="$L" "BEGIN{exit !(c+0<=l+0)}"
+SH
+chmod +x tmp/t15/gate.sh
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 RAYON_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1
+
+# (a) 20 jobs x 1 thread -> cores_used ~ 17-20; DEFAULT gate must reject
+seq 1 20 | /usr/bin/time -v -o tmp/t15/time20.txt xargs -P 20 -I{} .venv/bin/python tmp/t11/mm.py 8 > /dev/null
+if ./tmp/t15/gate.sh tmp/t15/time20.txt; then echo "DEFAULT GATE: PASS"; else echo "DEFAULT GATE: FAIL (exit 1) -> correctly rejected"; fi
+
+# (b) user grants BUDGET=20 for this session -> same run must pass
+BUDGET=20
+./tmp/t15/gate.sh tmp/t15/time20.txt "$BUDGET.5" && echo "OVERRIDE GATE: PASS (exit 0)"
+
+# (c) clamp the granted budget to the real core count
+# (getconf is immune to OMP_NUM_THREADS, which (a) exported; plain nproc would report 1)
+CORES=$(getconf _NPROCESSORS_ONLN 2>/dev/null || env -u OMP_NUM_THREADS nproc)
+[ "$BUDGET" -gt "$CORES" ] && BUDGET=$CORES
+echo "effective BUDGET=$BUDGET (cores=$CORES)"'
+```
+
+**Pass:**
+- (a) prints `cores_used=` above 15.5 and `DEFAULT GATE: FAIL (exit 1) ->
+  correctly rejected`.
+- (b) prints `cores_used=… limit=20.5` and `OVERRIDE GATE: PASS (exit 0)` —
+  same measurement file, different verdict only because the user raised the
+  budget.
+- (c) prints `effective BUDGET=…` no greater than `cores=…`, where `cores`
+  is the real machine count (64 on a 64-core box), never a capped value.
+
+---
+
 ## Result summary
 
 | Test | Rule | Result |
@@ -368,8 +421,9 @@ curl -sS --connect-timeout 3 -o /dev/null "$URL_DEAD" 2>/dev/null || echo "LOCAL
 | T12 | gate rejects violations; env caps cooperative | ☐ PASS / ☐ FAIL |
 | T13 | connection retry 5 × 10 s then abort | ☐ PASS / ☐ FAIL |
 | T14 | download fallback (probe → remote-first → local transfer → report) | ☐ PASS / ☐ FAIL |
+| T15 | user-granted budget override (default 15 → user-set, clamped) | ☐ PASS / ☐ FAIL |
 
-**Gate:** all fifteen must be PASS before copying `SKILL.md` to `~/.config/opencode/skills/ssh/`.
+**Gate:** all sixteen must be PASS before copying `SKILL.md` to `~/.config/opencode/skills/ssh/`.
 
 ## Cleanup (after the gate passes)
 ```
